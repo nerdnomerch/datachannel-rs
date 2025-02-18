@@ -1,79 +1,45 @@
-#[cfg(not(any(feature = "log", feature = "tracing")))]
-compile_error!("one of the features ['log', 'tracing'] must be enabled");
-
-#[cfg(all(feature = "log", feature = "tracing"))]
-compile_error!("only one of ['log', 'tracing'] can be enabled");
-
-use std::sync::Once;
-
 mod config;
 mod datachannel;
 mod error;
-mod logger;
 mod peerconnection;
-mod track;
-
-static INIT_LOGGING: Once = Once::new();
 
 mod sys {
     use std::ffi::CStr;
     use std::os::raw::c_char;
 
     use datachannel_sys as sys;
+    use lazy_static::lazy_static;
 
-    use crate::logger;
+    lazy_static! {
+        pub(super) static ref INIT_LOGGING: () = {
+            let level = match log::max_level() {
+                log::LevelFilter::Off => sys::rtcLogLevel_RTC_LOG_NONE,
+                log::LevelFilter::Error => sys::rtcLogLevel_RTC_LOG_ERROR,
+                log::LevelFilter::Warn => sys::rtcLogLevel_RTC_LOG_WARNING,
+                log::LevelFilter::Info => sys::rtcLogLevel_RTC_LOG_INFO,
+                log::LevelFilter::Debug => sys::rtcLogLevel_RTC_LOG_DEBUG,
+                log::LevelFilter::Trace => sys::rtcLogLevel_RTC_LOG_VERBOSE,
+            };
+            unsafe { sys::rtcInitLogger(level, Some(log_callback)) };
+        };
+    }
 
-    pub(crate) unsafe extern "C" fn log_callback(level: sys::rtcLogLevel, message: *const c_char) {
+    unsafe extern "C" fn log_callback(level: sys::rtcLogLevel, message: *const c_char) {
         let message = CStr::from_ptr(message).to_string_lossy();
         match level {
             sys::rtcLogLevel_RTC_LOG_NONE => (),
-            sys::rtcLogLevel_RTC_LOG_ERROR | sys::rtcLogLevel_RTC_LOG_FATAL => {
-                logger::error!("{}", message)
-            }
-            sys::rtcLogLevel_RTC_LOG_WARNING => logger::warn!("{}", message),
-            sys::rtcLogLevel_RTC_LOG_INFO => logger::info!("{}", message),
-            sys::rtcLogLevel_RTC_LOG_DEBUG => logger::debug!("{}", message),
-            sys::rtcLogLevel_RTC_LOG_VERBOSE => logger::trace!("{}", message),
+            sys::rtcLogLevel_RTC_LOG_ERROR => log::error!("{}", message),
+            sys::rtcLogLevel_RTC_LOG_WARNING => log::warn!("{}", message),
+            sys::rtcLogLevel_RTC_LOG_INFO => log::info!("{}", message),
+            sys::rtcLogLevel_RTC_LOG_DEBUG => log::debug!("{}", message),
+            sys::rtcLogLevel_RTC_LOG_VERBOSE => log::trace!("{}", message),
             _ => unreachable!(),
         }
     }
 }
 
-#[cfg(feature = "log")]
 fn ensure_logging() {
-    INIT_LOGGING.call_once(|| {
-        let level = match log::max_level() {
-            log::LevelFilter::Off => datachannel_sys::rtcLogLevel_RTC_LOG_NONE,
-            log::LevelFilter::Error => datachannel_sys::rtcLogLevel_RTC_LOG_ERROR,
-            log::LevelFilter::Warn => datachannel_sys::rtcLogLevel_RTC_LOG_WARNING,
-            log::LevelFilter::Info => datachannel_sys::rtcLogLevel_RTC_LOG_INFO,
-            log::LevelFilter::Debug => datachannel_sys::rtcLogLevel_RTC_LOG_DEBUG,
-            log::LevelFilter::Trace => datachannel_sys::rtcLogLevel_RTC_LOG_VERBOSE,
-        };
-        unsafe { datachannel_sys::rtcInitLogger(level, Some(sys::log_callback)) };
-    });
-}
-
-fn ffi_string(ffi: &[u8]) -> crate::error::Result<String> {
-    use std::ffi::CStr;
-    let bytes = CStr::to_bytes(CStr::from_bytes_with_nul(ffi)?);
-    Ok(String::from_utf8(bytes.to_vec())?)
-}
-
-/// An optional function to enable libdatachannel logging via `tracing`, otherwise it will be disabled.
-#[cfg(feature = "tracing")]
-pub fn configure_logging(level: tracing::Level) {
-    INIT_LOGGING.call_once(|| {
-        let level = match level {
-            tracing::Level::ERROR => datachannel_sys::rtcLogLevel_RTC_LOG_ERROR,
-            tracing::Level::WARN => datachannel_sys::rtcLogLevel_RTC_LOG_WARNING,
-            tracing::Level::INFO => datachannel_sys::rtcLogLevel_RTC_LOG_INFO,
-            tracing::Level::DEBUG => datachannel_sys::rtcLogLevel_RTC_LOG_DEBUG,
-            tracing::Level::TRACE => datachannel_sys::rtcLogLevel_RTC_LOG_VERBOSE,
-        };
-
-        unsafe { datachannel_sys::rtcInitLogger(level, Some(sys::log_callback)) };
-    });
+    *sys::INIT_LOGGING;
 }
 
 /// An optional function to preload resources, otherwise they will be loaded lazily.
@@ -82,22 +48,15 @@ pub fn preload() {
 }
 
 /// An optional resources cleanup function.
-pub fn cleanup() {
+pub fn unload() {
     unsafe { datachannel_sys::rtcCleanup() };
 }
 
-pub use crate::config::{CertificateType, RtcConfig, TransportPolicy};
-pub use crate::datachannel::{
-    DataChannelHandler, DataChannelId, DataChannelInfo, DataChannelInit, Reliability,
-    RtcDataChannel,
-};
-pub use crate::error::{Error, Result};
+pub use crate::config::Config;
+pub use crate::datachannel::{DataChannel, MakeDataChannel, Reliability, RtcDataChannel};
 pub use crate::peerconnection::{
-    fmt_sdp, serde_sdp, CandidatePair, ConnectionState, GatheringState, IceCandidate, IceState,
-    PeerConnectionHandler, PeerConnectionId, RtcPeerConnection, SdpType, SessionDescription,
-    SignalingState,
+    ConnectionState, DescriptionType, GatheringState, IceCandidate, PeerConnection,
+    RtcPeerConnection, SessionDescription,
 };
-pub use crate::track::{Codec, Direction, RtcTrack, TrackHandler, TrackInit};
 
-#[doc(inline)]
 pub use webrtc_sdp as sdp;
